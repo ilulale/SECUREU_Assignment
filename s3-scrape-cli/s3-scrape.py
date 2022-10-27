@@ -9,10 +9,11 @@ from multiprocessing.pool import ThreadPool
 import csv
 import re
 from urllib.parse import unquote
+from urllib.request import urlopen
 
 
 def init_csv():
-    fields = ["Status", "URL", "RES Code"]
+    fields = ["Status", "URL", "Bucket Url"]
     with open("output.csv", "w+") as csvfile:
         csvwriter = csv.writer(csvfile)
         csvwriter.writerow(fields)
@@ -29,7 +30,7 @@ def validate_and_fix_url(url):
     if url_valid:
         return url
     else:
-        url = "http://" + url
+        url = "https://" + url
         url_valid = validators.url(url)
         if url_valid:
             return url
@@ -39,8 +40,25 @@ def validate_and_fix_url(url):
             # sys.exit()
 
 
-def get_s3_status(url):
-    og_url = url
+def generate_s3_permutations(url):
+    url = url.replace("https://", "")
+    url = url.split(".")
+    tld = "s3.amazonaws.com"
+    url = url[0:2]
+    s3_permutations = [f"{url[0]}.{tld}"]
+    for i in range(len(url)):
+        for j in range(len(url)):
+            if i != j:
+                s3_permutations.append(f"{url[i]}.{url[j]}.{tld}")
+                s3_permutations.append(f"{url[i]}-{url[j]}.{tld}")
+    return s3_permutations
+
+
+UNIQUE_URLS = []
+
+
+def get_s3_status(url, og_url):
+    print(f"[WORKING] {url}")
     url = validate_and_fix_url(url)
     # print(f"Validating {og_url} -> {url}")
     try:
@@ -48,17 +66,18 @@ def get_s3_status(url):
         if res.status_code == 200:
             # res_dict = xmltodict.parse(res.content)
             # print(json.dumps(res_dict, indent=2))
-            print(f"[FOUND] {url}, access : public ")
-            write_to_csv(["PUBLIC", url, res.status_code])
-            return ["PUBLIC", url, res.status_code]
+            print(f"[FOUND] {og_url}, access : public ")
+            write_to_csv(["PUBLIC", og_url, url])
+            return ["PUBLIC", og_url, url]
         elif res.status_code == 403:
-            print(f"[FOUND] {url}, access : private ")
-            write_to_csv(["PRIVATE", url, res.status_code])
-            return ["PRIVATE", url, res.status_code]
+            print(f"[FOUND] {og_url}, access : private ")
+            write_to_csv(["PRIVATE", og_url, url])
+            return ["PRIVATE", og_url, url]
         else:
-            pass
-            # write_to_csv(["DOES NOT EXIST", url, res.status_code])
-            # return ["DOES NOT EXIST", url, res.status_code]
+            if og_url not in UNIQUE_URLS:
+                UNIQUE_URLS.append(og_url)
+                write_to_csv(["Exists", og_url])
+            return ["Exists", og_url]
     except:
         pass
         # write_to_csv(["ERROR", url])
@@ -76,7 +95,6 @@ def hosted_on_s3_check(url):
         res = requests.get(url)
         if "Server" in res.headers:
             if res.headers["Server"] == "AmazonS3":
-                write_to_csv(["Exists", url])
                 print(
                     f"Files hosted on s3 with header Server : {res.headers['Server']} URL : {url}"
                 )
@@ -102,35 +120,53 @@ def generate_subdomains(domain, limit):
 def check_site_exits(url):
     url = validate_and_fix_url(url)
     try:
-        res = requests.get(url)
-        if res.status_code == 200:
+        code = urlopen(url).code
+        if code / 100 >= 4:
+            return None
+        if code / 100 < 3:
+            print(f"[VALID] {url}")
             return url
         else:
             return None
     except:
-        print(f"Error in {url}")
+        pass
+        # print(f"[ERROR] {url}")
+
+
+def validate_and_check_s3_status(url):
+    url = check_site_exits(url)
+    if url is not None:
+        s3_status = hosted_on_s3_check(url)
+        if s3_status is not None:
+            s3_permutations = generate_s3_permutations(s3_status)
+            res_val = []
+            for perm in s3_permutations:
+                check = get_s3_status(perm, s3_status)
+                res_val.append(check)
+            if len(res_val) >= 1:
+                return s3_status
+        else:
+            write_to_csv(["No S3", url])
+    else:
+        return None
 
 
 def main():
     domain = input("[+] Enter a URL :\n> ")
+    limit = input("[+] Enter number of subdomain combinations (<10000) :\n> ")
+    limit = int(limit)
 
-    subdomains = generate_subdomains(domain, 1000)
+    subdomains = generate_subdomains(domain, limit)
 
     valid_subdomains = []
     pool = ThreadPool()
-    print("Validating subdomains....\n")
-    valid_subdomains = pool.map(check_site_exits, subdomains)
+    init_csv()
+    print("Validating subdomains and checking S3 status....\n")
+    valid_subdomains = pool.map(validate_and_check_s3_status, subdomains)
     valid_subdomains = list(filter(lambda item: item is not None, valid_subdomains))
-    print(valid_subdomains)
-
-    # pool = ThreadPool()
-    # print("Fetching for S3 Buckets....\n")
-    # init_csv()
-    # result = pool.map(hosted_on_s3_check, domains)
-    # result = list(filter(lambda item: item is not None, result))
-    # print(result)
-    # print(f"Total ({len(result)}) buckets found.")
-    # print(f"Output is written to > {os.getcwd()}/output.csv")
+    print(f"Total ({len(valid_subdomains)}) buckets found.")
+    print(f"Output is written to > {os.getcwd()}/output.csv")
+    print(f"Go to http://localhost:8080 to visualise data.")
 
 
 if __name__ == "__main__":
