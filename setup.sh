@@ -1,5 +1,9 @@
 if ! [ -x "$(command -v docker)" ]; then
-  echo 'Error: Docker is not installed.' >&2
+  echo 'Docker is not installed.Installing Docker ....' >&2
+  sudo apt install docker.io
+  sudo groupadd docker
+  sudo usermod -aG docker $USER
+  echo 'Restart session to enable docker'
   exit 1
 fi
 
